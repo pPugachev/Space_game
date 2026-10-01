@@ -7,17 +7,34 @@ const H = BALANCE.world.height;
 const SHIP_IMG = new Image();
 SHIP_IMG.src = '/img/player/ship.png';
 
+const BOSS_IMGS = {};
+BOSS_IMGS.dreadnought = new Image();
+BOSS_IMGS.dreadnought.src = '/img/enemies/dreadnought.png';
+BOSS_IMGS.phantom = new Image();
+BOSS_IMGS.phantom.src = '/img/enemies/phantom.png';
+BOSS_IMGS.leviathan = new Image();
+BOSS_IMGS.leviathan.src = '/img/enemies/leviathan.png';
+
 const SLOT_COLORS = ['#5ad0ff', '#ffb458', '#7dff9e', '#ff8ad8'];
+
+// Косметика корабля (Б2): описание по ключу из снапшота (p.co)
+function cosmeticDef(key) {
+  if (!key || key === 'default') return null;
+  return (BALANCE.hangar?.cosmetics || []).find((c) => c.key === key) || null;
+}
 const FX_COLORS = {
   boom: ['#ffd75e', '#ff9d4d', '#ff6b4a'],
   hit: ['#ffffff', '#ffe9a8'],
   coin: ['#ffd75e', '#fff3c0'],
+  energy: ['#7dff9e', '#c8ffd9'],
   shoot: ['#fff2b0'],
   spawn: ['#5ad0ff', '#bff1ff'],
   upgrade: ['#7dff9e', '#d2ffde'],
   shield: ['#7dd8ff', '#bff1ff'],
   laser: ['#ff5a66', '#ffb0b8'],
   mine: ['#ffb458', '#ffd08a'],
+  levelup: ['#b88bff', '#ffe9a8'],
+  bossphase: ['#ffd75e', '#ffffff', '#9d7dff', '#ff5a66'],
 };
 
 function hashRand(seed) {
@@ -36,6 +53,13 @@ export function createRenderer(canvas) {
   let dpr = 1;
   let cssW = 0;
   let cssH = 0;
+  let mouseX = 0;
+  let mouseY = 0;
+  canvas.addEventListener('mousemove', (e) => {
+    const r = canvas.getBoundingClientRect();
+    mouseX = e.clientX - r.left;
+    mouseY = e.clientY - r.top;
+  });
 
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -132,6 +156,8 @@ export function createRenderer(canvas) {
   }
 
   let onFxSound = null;
+  let onCometWarnCb = null;
+  const seenCometWarn = new Set();
   let lastTs = null;
   let current = null;
 
@@ -165,6 +191,38 @@ export function createRenderer(canvas) {
     ctx.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, (view.ox + shx) * dpr, (view.oy + shy) * dpr);
 
     drawWorld(ctx, current, ts / 1000, dt);
+
+    // кастомный прицел — контрастный, с чёрной подложкой и свечением,
+    // чтобы не терялся на любом фоне (объекты, туманность, астероиды)
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cx = mouseX;
+    const cy = mouseY;
+    const pl = 1 + 0.08 * Math.sin(ts * 0.006);
+    const sz = 10 * pl;
+    const arm = 3;
+    ctx.lineCap = 'round';
+    // 1) широкая тёмная подложка (контур), гарантирует контраст
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = 'rgba(0,0,0,0.78)';
+    ctx.beginPath(); ctx.moveTo(cx - sz, cy); ctx.lineTo(cx + sz, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy - sz); ctx.lineTo(cx, cy + sz); ctx.stroke();
+    // 2) белые линии поверх подложки (с разрывом в центре)
+    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(255,255,255,.85)';
+    ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.moveTo(cx - sz, cy); ctx.lineTo(cx - arm, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx + arm, cy); ctx.lineTo(cx + sz, cy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy - sz); ctx.lineTo(cx, cy - arm); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy + arm); ctx.lineTo(cx, cy + sz); ctx.stroke();
+    // 3) яркие уголки + центральная точка со свечением
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(cx, cy, 2.0, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.arc(cx, cy, 3.6, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'butt';
   }
 
   function drawWorld(ctx, s, now, dt) {
@@ -216,6 +274,27 @@ export function createRenderer(canvas) {
       ctx.fill();
     }
 
+    // энергетические сферы (экспа) — зелёные, светятся
+    for (const sph of (s.en || [])) {
+      const pulse = 1 + 0.15 * Math.sin(now * 5 + sph.i);
+      ctx.save();
+      ctx.shadowColor = 'rgba(125,255,158,.8)';
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = '#3ad66e';
+      ctx.strokeStyle = '#1a7a38';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(sph.x, sph.y, 8 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#c8ffd9';
+      ctx.beginPath();
+      ctx.arc(sph.x - 2, sph.y - 2.2, 2.6 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     // powerups (щит/ускорение)
     const PU_COLORS = { rapidFire: '#ff6ba8', shield: '#5ad0ff' };
     const PU_GLOW = { rapidFire: 'rgba(255,107,168,.6)', shield: 'rgba(90,208,255,.6)' };
@@ -243,6 +322,73 @@ export function createRenderer(canvas) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(u.tp === 'rapidFire' ? '⚡' : '🛡', 0, 1);
+      ctx.restore();
+    }
+
+    // патроны для ракет (оранжевые «ящики» с ракетой)
+    for (const pk of (s.mp || [])) {
+      const pulse = 1 + 0.14 * Math.sin(now * 6 + pk.i);
+      ctx.save();
+      ctx.translate(pk.x, pk.y);
+      ctx.rotate(Math.PI / 4);
+      ctx.scale(pulse, pulse);
+      ctx.shadowColor = 'rgba(255,180,88,.7)';
+      ctx.shadowBlur = 10;
+      ctx.fillStyle = '#3a2a12';
+      ctx.strokeStyle = '#ffb458';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.rect(-10, -10, 20, 20);
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // мини-ракета внутри
+      ctx.fillStyle = '#dfe6f2';
+      ctx.strokeStyle = '#8fa2c0';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(5, 0);
+      ctx.lineTo(-4, -3);
+      ctx.lineTo(-2, 0);
+      ctx.lineTo(-4, 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // заряды способностей (броня/лазер/мины) — цветные шестиугольники
+    const AP_COLORS = { armor: '#7dd8ff', laser: '#ff6b9e', mines: '#ffb458' };
+    const AP_GLOW = { armor: 'rgba(125,216,255,.7)', laser: 'rgba(255,107,158,.7)', mines: 'rgba(255,180,88,.7)' };
+    const AP_ICONS = { armor: '🛡', laser: '⚡', mines: '💣' };
+    for (const pk of (s.ap || [])) {
+      const color = AP_COLORS[pk.k] || '#ffffff';
+      const glow = AP_GLOW[pk.k] || 'rgba(255,255,255,.3)';
+      const pulse = 1 + 0.14 * Math.sin(now * 6 + pk.i);
+      ctx.save();
+      ctx.translate(pk.x, pk.y);
+      ctx.rotate(now * 1.5 + pk.i);
+      ctx.shadowColor = glow;
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = '#1a1a2e';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) {
+        const a = k * Math.PI / 3;
+        const r = 10 * pulse;
+        if (k === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+        else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = color;
+      ctx.font = 'bold 10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(AP_ICONS[pk.k] || '?', 0, 1);
       ctx.restore();
     }
 
@@ -316,6 +462,111 @@ export function createRenderer(canvas) {
       }
     }
 
+    // предупреждение о кометах: мигающая стрелка у края арены
+    for (const cw of (s.cw || [])) {
+      if ((now % 0.3) >= 0.15) continue; // мигает несколько раз
+      const ang = Math.atan2(cw.vy, cw.vx);
+      const pulse = (now % 0.55) / 0.55;
+      // кольцо-импульс у точки входа
+      ctx.strokeStyle = 'rgba(140,205,255,' + (0.55 * (1 - pulse)).toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cw.x, cw.y, 10 + pulse * 26, 0, Math.PI * 2);
+      ctx.stroke();
+      // стрелка по направлению полёта (внутрь арены)
+      ctx.save();
+      ctx.translate(cw.x, cw.y);
+      ctx.rotate(ang);
+      ctx.fillStyle = 'rgba(207,232,255,.9)';
+      ctx.strokeStyle = '#6db3ff';
+      ctx.lineWidth = 2.2;
+      ctx.shadowColor = 'rgba(90,208,255,.95)';
+      ctx.shadowBlur = 16;
+      ctx.beginPath();
+      ctx.moveTo(26, 0);
+      ctx.lineTo(0, -12);
+      ctx.lineTo(9, 0);
+      ctx.lineTo(0, 12);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.moveTo(17, 0);
+      ctx.lineTo(6, -5);
+      ctx.lineTo(9.5, 0);
+      ctx.lineTo(6, 5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    const WARN_ICON_COLOR = { dreadnought: '#ff9d4d', phantom: '#9d7dff', leviathan: '#4dffc8' };
+
+    // В2: предупреждение о боссе — серия мигающих значков на стороне входа
+    for (const pb of (s.pb || [])) {
+      const baseKey = (pb.k || '').replace(/\++$/, '');
+      const col = WARN_ICON_COLOR[baseKey] || '#ff9d4d';
+      const n = BALANCE.bosses.warnIcons || 4;
+      const inward = {
+        0: Math.PI / 2,   // сверху — вниз
+        1: Math.PI,       // справа — влево
+        2: -Math.PI / 2,  // снизу — вверх
+        3: 0,             // слева — вправо
+      }[pb.s] ?? 0;
+      const off0 = -Math.floor(n / 2);
+      for (let k = 0; k < n; k++) {
+        const idx = off0 + k;
+        const dx = (pb.s === 0 || pb.s === 2) ? 0 : idx * 38;
+        const dy = (pb.s === 0 || pb.s === 2) ? idx * 38 : 0;
+        const x = pb.x + dx;
+        const y = pb.y + dy;
+        const urgent = pb.t < 600 ? (now % 0.25) < 0.13 : (now % 0.5) < 0.25;
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(inward);
+        ctx.globalAlpha = urgent ? 0.95 : 0.3;
+        ctx.fillStyle = col;
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = col;
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.moveTo(30, 0);
+        ctx.lineTo(0, -13);
+        ctx.lineTo(11, 0);
+        ctx.lineTo(0, 13);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.moveTo(20, 0);
+        ctx.lineTo(7, -6);
+        ctx.lineTo(11, 0);
+        ctx.lineTo(7, 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      // имя босса рядом со значками
+      const def = (pb.k && BALANCE.bosses.types[pb.k]) || null;
+      if (def) {
+        ctx.save();
+        ctx.font = 'bold 13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = col;
+        ctx.shadowColor = col;
+        ctx.shadowBlur = 8;
+        const labelX = pb.s === 1 ? pb.x - 64 : pb.s === 3 ? pb.x + 64 : pb.x;
+        const labelY = pb.s === 0 ? pb.y + 78 : pb.s === 2 ? pb.y - 58 : pb.y + 5;
+        ctx.fillText((def.name + '').toUpperCase(), labelX, labelY);
+        ctx.restore();
+      }
+    }
+
     // пули (вражеские — красные)
     ctx.lineCap = 'round';
     for (const b of s.bs) {
@@ -372,44 +623,158 @@ export function createRenderer(canvas) {
       ctx.restore();
     }
 
-    // вражеские корабли
+    // вражеские корабли (4 вида: охотник, бронированный, очередь, орбитальный)
     for (const en of (s.es || [])) {
+      const kind = en.k || 'enemy';
       ctx.save();
       ctx.translate(en.x, en.y);
       ctx.rotate(en.a);
-      // пламя двигателя
-      const fl = 8 + Math.random() * 8;
-      ctx.fillStyle = Math.random() < 0.5 ? '#ff5a66' : '#ff9d4d';
-      ctx.beginPath();
-      ctx.moveTo(-11, -4);
-      ctx.lineTo(-11 - fl, 0);
-      ctx.lineTo(-11, 4);
-      ctx.closePath();
-      ctx.fill();
-      // корпус
-      ctx.fillStyle = '#1c1016';
-      ctx.strokeStyle = '#ff5a66';
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.moveTo(20, 0);
-      ctx.lineTo(-13, -12);
-      ctx.lineTo(-5, 0);
-      ctx.lineTo(-13, 12);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = '#ff8ad8';
-      ctx.beginPath();
-      ctx.arc(3, 0, 3.4, 0, Math.PI * 2);
-      ctx.fill();
+
+      if (kind === 'armored') {
+        // бронированный: шестигранная бронепластина
+        const fl = 7 + Math.random() * 6;
+        ctx.fillStyle = Math.random() < 0.5 ? '#5b6678' : '#7a8799';
+        ctx.beginPath();
+        ctx.moveTo(-10, -5);
+        ctx.lineTo(-10 - fl, 0);
+        ctx.lineTo(-10, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#232a38';
+        ctx.strokeStyle = '#6ec9ff';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        for (let k = 0; k < 6; k++) {
+          const ang = (k / 6) * Math.PI * 2;
+          const rr = k % 2 === 0 ? 15 : 12;
+          const px = Math.cos(ang) * rr;
+          const py = Math.sin(ang) * rr;
+          if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#3b4a63';
+        ctx.beginPath();
+        ctx.arc(0, 0, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#161d2b';
+        ctx.strokeStyle = '#8fd8ff';
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(19, 0);
+        ctx.lineTo(8, -4);
+        ctx.lineTo(8, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else if (kind === 'burst') {
+        // очередной стрелок: стреловидный с двумя стволами
+        const fl = 9 + Math.random() * 8;
+        ctx.fillStyle = Math.random() < 0.5 ? '#ff7b3d' : '#ffb158';
+        ctx.beginPath();
+        ctx.moveTo(-11, -4);
+        ctx.lineTo(-11 - fl, 0);
+        ctx.lineTo(-11, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#1d1408';
+        ctx.strokeStyle = '#ffb158';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(21, 0);
+        ctx.lineTo(-12, -11);
+        ctx.lineTo(-6, 0);
+        ctx.lineTo(-12, 11);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = '#ff7b3d';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(22, -3); ctx.lineTo(27, -3);
+        ctx.moveTo(22, 3); ctx.lineTo(27, 3);
+        ctx.stroke();
+        // пульс «заряженной очереди»
+        const pulse = 0.6 + 0.4 * Math.sin(now * 20 + en.i);
+        ctx.fillStyle = `rgba(255,160,60,${0.25 + 0.3 * pulse})`;
+        ctx.beginPath();
+        ctx.arc(0, 0, 2 + 3 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (kind === 'orbital') {
+        // орбитальный: круглая платформа с вращающимся кольцом
+        ctx.fillStyle = '#0d1a1e';
+        ctx.strokeStyle = '#4fe3c1';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = '#8ffff0';
+        ctx.lineWidth = 2.4;
+        ctx.beginPath();
+        ctx.arc(0, 0, 18, now * 3 + en.i, now * 3 + en.i + 4.2);
+        ctx.stroke();
+        ctx.fillStyle = '#4fe3c1';
+        ctx.beginPath();
+        ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#c9fff2';
+        ctx.beginPath();
+        ctx.arc(18, 0, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // охотник: стандартный красный
+        const fl = 8 + Math.random() * 8;
+        ctx.fillStyle = Math.random() < 0.5 ? '#ff5a66' : '#ff9d4d';
+        ctx.beginPath();
+        ctx.moveTo(-11, -4);
+        ctx.lineTo(-11 - fl, 0);
+        ctx.lineTo(-11, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#1c1016';
+        ctx.strokeStyle = '#ff5a66';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.moveTo(20, 0);
+        ctx.lineTo(-13, -12);
+        ctx.lineTo(-5, 0);
+        ctx.lineTo(-13, 12);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = '#ff8ad8';
+        ctx.beginPath();
+        ctx.arc(3, 0, 3.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
       ctx.restore();
+
       // полоска HP
-      if (en.h < en.hm) {
-        const bw = 30;
+      const bw = 30;
+      if (en.h < en.hm || kind === 'armored') {
         ctx.fillStyle = 'rgba(0,0,0,.55)';
         ctx.fillRect(en.x - bw / 2, en.y - 26, bw, 4);
-        ctx.fillStyle = '#ff5a66';
+        ctx.fillStyle = kind === 'armored' ? '#6ec9ff' : '#ff5a66';
         ctx.fillRect(en.x - bw / 2, en.y - 26, bw * Math.max(0, en.h / en.hm), 4);
+      }
+      // бронированный: полоска брони (иконка)
+      if (kind === 'armored' && en.am > 0) {
+        ctx.fillStyle = 'rgba(0,0,0,.55)';
+        ctx.fillRect(en.x - bw / 2, en.y - 21, bw, 3);
+        ctx.fillStyle = '#4fb6ff';
+        const ratio = Math.max(0, Math.min(1, (en.ar || 0) / en.am));
+        ctx.fillRect(en.x - bw / 2, en.y - 21, bw * ratio, 3);
+      }
+      // очередной стрелок: индикатор усиления монетами
+      if (kind === 'burst' && en.pw) {
+        ctx.fillStyle = '#ffb158';
+        for (let q = 0; q < Math.min(en.pw, 8); q++) {
+          ctx.beginPath();
+          ctx.arc(en.x - bw / 2 + 6 + q * 5, en.y - 31, 1.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
 
@@ -473,45 +838,105 @@ export function createRenderer(canvas) {
       ctx.beginPath(); ctx.moveTo(owner.x, owner.y); ctx.lineTo(x1,y1); ctx.stroke();
     }
 
+    // лазеры боссов (В1: левиафан++)
+    for (const bl of (s.bl || [])) {
+      const len = 760;
+      const x2 = bl.x + Math.cos(bl.a) * len;
+      const y2 = bl.y + Math.sin(bl.a) * len;
+      ctx.strokeStyle = 'rgba(255,70,50,.9)';
+      ctx.shadowColor = '#ff2d2d'; ctx.shadowBlur = 18; ctx.lineWidth = 8;
+      ctx.beginPath(); ctx.moveTo(bl.x, bl.y); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(bl.x, bl.y); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+
     // боссы
     for (const b of (s.bo || [])) {
       const def = BALANCE.bosses.types[b.k];
-      const r = def ? def.radius : 50;
-      ctx.save();
-      ctx.translate(b.x, b.y);
-      ctx.rotate(b.a);
-      const col = b.k==='dreadnought' ? '#ff9d4d' : b.k==='phantom' ? '#9d7dff' : '#4dffc8';
-      const pulse = 1 + 0.06*Math.sin(now*3 + b.i);
-      ctx.scale(pulse, pulse);
-      // корпус
-      ctx.fillStyle = '#0f131c';
-      ctx.strokeStyle = col;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      if(b.k==='leviathan'){
-        // круглый
-        ctx.arc(0,0,r,0,Math.PI*2);
-        ctx.fill(); ctx.stroke();
-        ctx.fillStyle=col; ctx.beginPath(); ctx.arc(0,0,8,0,Math.PI*2); ctx.fill();
-        for(let k=0;k<6;k++){ const ang=k*Math.PI/3; ctx.fillStyle='#1a2333'; ctx.beginPath(); ctx.arc(Math.cos(ang)*(r-14), Math.sin(ang)*(r-14), 7,0,Math.PI*2); ctx.fill(); ctx.strokeStyle=col; ctx.lineWidth=1.2; ctx.stroke(); }
-      } else if(b.k==='phantom'){
-        ctx.moveTo(26,0); ctx.lineTo(-18,-22); ctx.lineTo(-10,0); ctx.lineTo(-18,22); ctx.closePath(); ctx.fill(); ctx.stroke();
-        ctx.fillStyle=col; ctx.beginPath(); ctx.arc(4,0,6,0,Math.PI*2); ctx.fill();
+      const baseKey = (b.k || '').replace(/\++$/, '');
+      const r = b.r || (def ? def.radius : 50);
+      const col = baseKey==='dreadnought' ? '#ff9d4d' : baseKey==='phantom' ? '#9d7dff' : '#4dffc8';
+      const inside = b.x + r > 0 && b.x - r < W && b.y + r > 0 && b.y - r < H;
+      if (inside) {
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.a);
+        if (b.cl) ctx.globalAlpha = 0.45; // призрачные клоны фантома
+        const pulse = 1 + 0.06*Math.sin(now*3 + b.i);
+        ctx.scale(pulse, pulse);
+        ctx.fillStyle = '#0f131c';
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        const img = BOSS_IMGS[baseKey];
+        if (img && img.complete && img.naturalWidth > 0) {
+          const size = r * 3;
+          ctx.save();
+          ctx.rotate(Math.PI / 2);
+          ctx.drawImage(img, -size / 2, -size / 2, size, size);
+          ctx.restore();
+        } else {
+          ctx.fillRect(-r*0.9, -r*0.65, r*1.8, r*1.3);
+          ctx.strokeRect(-r*0.9, -r*0.65, r*1.8, r*1.3);
+          ctx.fillStyle='#1e2a3a'; ctx.fillRect(-r*0.6, -r*0.3, r*1.2, r*0.6);
+          ctx.fillStyle=col; ctx.fillRect(r*0.35, -6, 18,12);
+        }
+        ctx.restore();
+        ctx.globalAlpha = 1;
+        const bw = 74;
+        ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(b.x-bw/2, b.y - r -18, bw, 7);
+        ctx.fillStyle = b.h/b.hm <0.3 ? '#ff4d4d' : col;
+        ctx.fillRect(b.x-bw/2, b.y - r -18, bw*Math.max(0,b.h/b.hm),7);
+        ctx.fillStyle='#fff'; ctx.font='bold 10px sans-serif'; ctx.textAlign='center';
+        ctx.fillText((def?def.name:b.k).toUpperCase(), b.x, b.y - r -24);
+        // В3: полоска брони (под HP-баром), пополняется монетами — у любого босса со щитом
+        if (b.am > 0) {
+          ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(b.x-bw/2, b.y - r -9, bw, 5);
+          ctx.fillStyle='#4fb6ff';
+          const aratio = Math.max(0, Math.min(1, (b.ar || 0) / b.am));
+          ctx.fillRect(b.x-bw/2, b.y - r -9, bw*aratio, 5);
+        }
+        // В1: индикатор фаз — ромбики под HP-баром (текущая фаза ярче)
+        if (b.mx > 1 && !b.cl) {
+          const fx = b.mx || 1;
+          const step = 12;
+          const x0 = b.x - ((fx - 1) * step) / 2;
+          for (let i = 1; i <= fx; i++) {
+            const active = i <= (b.ph || 1);
+            ctx.fillStyle = active ? '#ffd75e' : 'rgba(255,255,255,.25)';
+            ctx.beginPath();
+            ctx.moveTo(x0 + (i - 1) * step, b.y - r - 2);
+            ctx.lineTo(x0 + (i - 1) * step + 4, b.y - r - 7);
+            ctx.lineTo(x0 + (i - 1) * step + 8, b.y - r - 2);
+            ctx.lineTo(x0 + (i - 1) * step + 4, b.y - r + 3);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
       } else {
-        // dreadnought прямоугольный
-        ctx.fillRect(-r*0.9, -r*0.65, r*1.8, r*1.3);
-        ctx.strokeRect(-r*0.9, -r*0.65, r*1.8, r*1.3);
-        ctx.fillStyle='#1e2a3a'; ctx.fillRect(-r*0.6, -r*0.3, r*1.2, r*0.6);
-        ctx.fillStyle=col; ctx.fillRect(r*0.35, -6, 18,12);
+        const cx = Math.max(r, Math.min(W - r, b.x));
+        const cy = Math.max(r, Math.min(H - r, b.y));
+        const ang = Math.atan2(b.y - cy, b.x - cx);
+        const tx = cx + Math.cos(ang) * 28;
+        const ty = cy + Math.sin(ang) * 28;
+        ctx.save();
+        ctx.translate(tx, ty);
+        ctx.rotate(ang);
+        ctx.fillStyle = '#ff4d4d';
+        ctx.beginPath();
+        ctx.moveTo(14, 0);
+        ctx.lineTo(-6, -8);
+        ctx.lineTo(-6, 8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle='#ff4d4d'; ctx.font='bold 10px sans-serif'; ctx.textAlign='center';
+        ctx.fillText((def?def.name:b.k).toUpperCase(), tx, ty - 12);
       }
-      ctx.restore();
-      // HP бар
-      const bw = 74;
-      ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(b.x-bw/2, b.y - r -18, bw, 7);
-      ctx.fillStyle = b.h/b.hm <0.3 ? '#ff4d4d' : col;
-      ctx.fillRect(b.x-bw/2, b.y - r -18, bw*Math.max(0,b.h/b.hm),7);
-      ctx.fillStyle='#fff'; ctx.font='bold 10px sans-serif'; ctx.textAlign='center';
-      ctx.fillText((def?def.name:b.k).toUpperCase(), b.x, b.y - r -24);
     }
 
     // корабли
@@ -522,11 +947,32 @@ export function createRenderer(canvas) {
       ctx.save();
       ctx.translate(p.x, p.y);
       ctx.globalAlpha = blink ? 0.28 : 1;
+
+      // косметика (Б2): цветовая подсветка / неоновое свечение вокруг корабля
+      const cos = cosmeticDef(p.co);
+      if (cos && cos.color) {
+        const isNeon = cos.kind === 'effect';
+        ctx.globalAlpha = blink ? 0.14 : (isNeon ? 0.45 : 0.22);
+        ctx.fillStyle = cos.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, isNeon ? 26 : 30, 0, Math.PI * 2);
+        ctx.fill();
+        if (isNeon) {
+          ctx.globalAlpha = blink ? 0.35 : 0.7;
+          ctx.strokeStyle = cos.color;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(0, 0, 27, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = blink ? 0.28 : 1;
+      }
       ctx.rotate(p.a);
 
+      const flameColor = cos && cos.color ? cos.color : null;
       if (p.th) { // пламя двигателя
         const fl = 10 + Math.random() * 9;
-        ctx.fillStyle = Math.random() < 0.5 ? '#ff9d4d' : '#ffd75e';
+        ctx.fillStyle = flameColor || (Math.random() < 0.5 ? '#ff9d4d' : '#ffd75e');
         ctx.beginPath();
         ctx.moveTo(-13, -5);
         ctx.lineTo(-13 - fl, 0);
@@ -631,6 +1077,7 @@ export function createRenderer(canvas) {
     timer: document.getElementById('timerText'),
     timerSub: document.getElementById('timerSub'),
     abilityBar: document.getElementById('abilityBar'),
+    godBadge: document.getElementById('godModeBadge'),
     upgBtns: [...document.querySelectorAll('.upg-btn')],
   };
   const hudCache = {};
@@ -642,15 +1089,20 @@ export function createRenderer(canvas) {
 
   function buildCard(el, p, color) {
     el.style.borderColor = color;
-    const key = p.i + '|' + p.n + '|' + p.s + '|' + p.l + '|' + p.c + '|' + p.o + '|' + Math.ceil((p.rs || 0) / 1000);
+    const key = p.i + '|' + p.n + '|' + p.s + '|' + p.l + '|' + p.c + '|' + p.e + '|' + p.o + '|' + p.mk + '|' + p.hm + '|' + (p.lv||1) + '|' + Math.ceil((p.rs || 0) / 1000);
     if (hudCache[el.id] !== key) {
       hudCache[el.id] = key;
       const lives = p.o ? '✕' : '♥'.repeat(p.l) + '<span style="opacity:.25">' + '♥'.repeat(Math.max(0, BALANCE.ship.lives - p.l)) + '</span>';
+      const lv = p.lv || 1;
+      const thr = Math.round(BALANCE.exp.baseThreshold * Math.pow(BALANCE.exp.multiplier, lv - 1));
       el.innerHTML =
         `<div class="ph-nick" style="color:${color}">${escapeHtml(p.n)}</div>` +
         `<div class="ph-score">${p.s}</div>` +
         `<div class="ph-line"><span class="lives">${lives}</span>` +
         `<span class="coins-ico">● ${p.c}</span>` +
+        `<span class="lvl-ico" title="Уровень rogue-like">★ ${lv}</span>` +
+        `<span class="energy-ico" title="Энергия (экспа: ${p.e}/${thr})">✦ ${p.e}/${thr}</span>` +
+        (p.hm ? `<span class="rockets-ico" title="Боезапас ракет">🚀 ${p.mk}/${p.mm || BALANCE.missile.maxAmmo}</span>` : '') +
         (p.rs > 0 ? `<span style="color:#ffc24b">возрождение ${Math.ceil(p.rs / 1000)}…</span>` : '') +
         '</div>';
     }
@@ -663,38 +1115,13 @@ export function createRenderer(canvas) {
   }
 
   function updateUpgrades(p) {
+    // A1: внутриматчевый магазин за монеты отключён — апгрейды берутся в Ангаре
     for (const btn of hudEls.upgBtns) {
-      const track = btn.dataset.track;
       const pipsEl = btn.querySelector('.pips');
       const costEl = btn.querySelector('.cost');
-      let pips;
-      let txt;
-      let disabled;
-      if (track === 'life') {
-        const def = BALANCE.upgrades.life;
-        const maxed = p.l >= def.maxLives;
-        pips = `${p.l}/${def.maxLives}`;
-        txt = maxed ? 'МАКС' : def.cost + ' мон.';
-        disabled = maxed || p.c < def.cost;
-      } else if (track === 'missiles') {
-        const def = BALANCE.upgrades.missiles;
-        const ammo = p.mk ?? 0;
-        const maxed = ammo >= def.maxAmmo;
-        pips = `×${ammo}`;
-        txt = maxed ? 'МАКС' : def.cost + ' мон.';
-        disabled = maxed || p.c < def.cost;
-      } else {
-        const def = BALANCE.upgrades[track];
-        const lvl = track === 'damage' ? p.dl : p.rl;
-        const max = def.costs.length;
-        const cost = def.costs[lvl];
-        pips = '●'.repeat(lvl) + '○'.repeat(max - lvl);
-        txt = cost == null ? 'МАКС' : cost + ' мон.';
-        disabled = cost == null || p.c < cost;
-      }
-      if (pipsEl.textContent !== pips) pipsEl.textContent = pips;
-      if (costEl.textContent !== txt) costEl.textContent = txt;
-      btn.disabled = disabled;
+      if (pipsEl && pipsEl.textContent !== '') pipsEl.textContent = '';
+      if (costEl && costEl.textContent !== 'Ангар') costEl.textContent = 'Ангар';
+      btn.disabled = true;
     }
   }
 
@@ -705,6 +1132,19 @@ export function createRenderer(canvas) {
     setState(s) {
       // новые эффекты → частицы/звук
       if (s.fx) for (const f of s.fx) spawnFxParticles(f);
+      // новые предупреждения о кометах → звук/напоминание
+      if (s.cw) {
+        for (const cw of s.cw) {
+          if (seenCometWarn.has(cw.i)) continue;
+          seenCometWarn.add(cw.i);
+          if (seenCometWarn.size > 400) {
+            const arr = [...seenCometWarn].slice(-200);
+            seenCometWarn.clear();
+            arr.forEach((v) => seenCometWarn.add(v));
+          }
+          if (onCometWarnCb) onCometWarnCb(cw, current);
+        }
+      }
       current = s;
     },
 
@@ -734,6 +1174,8 @@ export function createRenderer(canvas) {
       const sub = opts.subText || (opts.solo ? 'время полёта' : 'до конца матча');
       if (hudEls.timerSub.textContent !== sub) hudEls.timerSub.textContent = sub;
 
+      if (hudEls.godBadge) hudEls.godBadge.classList.toggle('hidden', !s.gm);
+
       // способности и временные пауэр-апы
       if (hudEls.abilityBar) {
         if (!me || !me.ab) hudEls.abilityBar.innerHTML='';
@@ -743,14 +1185,16 @@ export function createRenderer(canvas) {
           const parts=[];
           if (ab.sh > 0) parts.push(`<span style="padding:2px 6px;border-radius:6px;background:#0a2e4a;color:#5ad0ff;border:1px solid #2a6ea6">🛡 врем. щит ${Math.ceil(ab.sh/1000)}с</span>`);
           if (ab.rf > 0) parts.push(`<span style="padding:2px 6px;border-radius:6px;background:#4a1a3a;color:#ff6ba8;border:1px solid #a62a6e">⚡ ускорение ${Math.ceil(ab.rf/1000)}с</span>`);
-          if (ab.ar) parts.push(`<span style="padding:2px 6px;border-radius:6px;background:${ab.ac>0?'#0e3a4a':'#222'};color:#7dd8ff;border:1px solid #2a5a6e">🛡 Броня x${ab.ac} ${ab.ac===0? '('+fmt(ab.arCd)+')':''}</span>`);
+          if (ab.ar) parts.push(`<span style="padding:2px 6px;border-radius:6px;background:${ab.ac>0?'#0e3a4a':'#1a1a1a'};color:${ab.ac>0?'#7dd8ff':'#555'};border:1px solid #2a5a6e">🛡 Броня ${ab.ac}/${ab.amx||5}</span>`);
           if (ab.ls) {
             const active = ab.la>0;
-            parts.push(`<span style="padding:2px 6px;border-radius:6px;background:${active?'#4a0e1a': ab.lc<=0?'#3a1a2a':'#222'};color:#ff7a9e;border:1px solid #6e2a3a">Q ЛАЗЕР ${active? Math.ceil(ab.la/1000)+'с' : fmt(ab.lc)}</span>`);
+            const ready = ab.lac>0 && !active && ab.lc<=0;
+            parts.push(`<span style="padding:2px 6px;border-radius:6px;background:${active?'#4a0e1a':ready?'#3a1a2a':'#1a1a1a'};color:${ab.lac>0?'#ff7a9e':'#555'};border:1px solid #6e2a3a">Q ЛАЗЕР ${ab.lac}/${ab.lamx||3} ${active? '🔥 '+Math.ceil(ab.la/1000)+'с' : (ab.lac>0&&ab.lc>0?fmt(ab.lc):(ab.lac<=0?'нет зарядов':''))}</span>`);
           }
           if (ab.mn) {
-            const maxM = ab.mx||5;
-            parts.push(`<span style="padding:2px 6px;border-radius:6px;background:${ab.mc<=0?'#2a2a0e':'#222'};color:#ffd27a;border:1px solid #6e5a2a">E МИНЫ ${ab.ml}/${maxM} ${ab.mc>0? '('+fmt(ab.mc)+')':''}</span>`);
+            const maxM = ab.mx||10;
+            const ready = ab.ml>0 && ab.mc<=0;
+            parts.push(`<span style="padding:2px 6px;border-radius:6px;background:${ab.ml>0?(ready?'#2a2a0e':'#222'):'#1a1a1a'};color:${ab.ml>0?'#ffd27a':'#555'};border:1px solid #6e5a2a">E МИНЫ ${ab.ml}/${maxM} ${ab.ml>0&&ab.mc>0? '('+fmt(ab.mc)+')':(ab.ml<=0?'нет зарядов':'')}</span>`);
           }
           hudEls.abilityBar.innerHTML = parts.join('');
         }
@@ -758,5 +1202,6 @@ export function createRenderer(canvas) {
     },
 
     onFx(fn) { onFxSound = fn; },
+    onCometWarn(fn) { onCometWarnCb = fn; },
   };
 }

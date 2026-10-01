@@ -38,7 +38,6 @@ export function createInput(canvas, getView) {
       if (code === 'Digit1' || (e.key||'').toLowerCase()==='1') buyQueue.push('damage');
       if (code === 'Digit2' || (e.key||'').toLowerCase()==='2') buyQueue.push('firerate');
       if (code === 'Digit3' || (e.key||'').toLowerCase()==='3') buyQueue.push('life');
-      if (code === 'Digit4' || (e.key||'').toLowerCase()==='4') buyQueue.push('missiles');
     }
     keys.add(code);
   }

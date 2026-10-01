@@ -41,6 +41,12 @@ httpServer.on('request', async (req, res) => {
       return res.end(JSON.stringify({ ok: true, uptimeSec: Math.round((Date.now() - startedAt) / 1000) }));
     }
 
+    // публичные настройки для браузерного клиента (например, god mode из .env)
+    if (pathname === '/config') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ godMode: config.godMode }));
+    }
+
     const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     const baseDir = relative.startsWith('shared/') ? sharedDir : publicDir;
     const cleanRelative = relative.startsWith('shared/') ? relative.slice('shared/'.length) : relative;
@@ -68,7 +74,7 @@ const io = new Server(httpServer, {
 const db = createDb(config.dbPath);
 const roomManager = new RoomManager({ io, db, config, logger });
 const matchmaking = new MatchmakingQueue({ io, roomManager, config, logger });
-const gameManager = new GameManager({ io, config, logger });
+const gameManager = new GameManager({ io, config, logger, db });
 
 // комната стартовала → поднимаем серверную симуляцию; закрылась → гасим сессию
 roomManager.events.on('room-started', (room) => gameManager.attach(room, roomManager));

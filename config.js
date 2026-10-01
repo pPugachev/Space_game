@@ -22,4 +22,5 @@ export const config = {
   stateSendEveryTicks: int(process.env.STATE_SEND_EVERY_TICKS, 2),
   dbPath: process.env.DB_PATH || './data/server.db',
   logLevel: process.env.LOG_LEVEL || 'info',
+  godMode: /^(1|true|yes|on)$/i.test(process.env.GOD_MODE || ''),
 };

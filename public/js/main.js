@@ -2,8 +2,10 @@
 import { net, connect, api, getIdentity, saveNickname, isConnected } from './net.js';
 import { createInput } from './input.js';
 import { createRenderer } from './render.js';
-import { startLocalGame } from './local.js';
+import { startLocalGame, loadSoloModules, grantSoloModule } from './local.js';
 import { startMultiGame } from './multi.js';
+import { createHangar } from './hangar.js';
+import { BALANCE } from '/shared/balance.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -15,12 +17,24 @@ const els = {
   waitCode: $('waitCode'),
   waitCancelBtn: $('waitCancelBtn'),
   overOverlay: $('overOverlay'),
+  overImage: $('overImage'),
   overTitle: $('overTitle'),
   overReason: $('overReason'),
   overRows: $('overRows'),
   overRecord: $('overRecord'),
+  overRank: $('overRank'),
   againBtn: $('againBtn'),
   toMenuBtn: $('toMenuBtn'),
+  rankBtn: $('rankBtn'),
+  rankOverlay: $('rankOverlay'),
+  rankTabs: $('rankTabs'),
+  rankSizes: $('rankSizes'),
+  rankMeta: $('rankMeta'),
+  rankList: $('rankList'),
+  rankCloseBtn: $('rankCloseBtn'),
+  hangarBtn: $('hangarBtn'),
+  hangarBtnOver: $('hangarBtnOver'),
+  hangarOverlay: $('hangarOverlay'),
   gameHint: $('gameHint'),
   announce: $('announce'),
   nickInput: $('nickInput'),
@@ -42,6 +56,29 @@ let current = null; // { mode: 'solo'|'multi', controller }
 let selfId = null;
 let overShown = false;
 let lastMode = null;
+let serverGodMode = false;
+let serverConfigLoaded = false;
+let playerStats = null;
+
+// Единая точка обновления статистики аккаунта (Ангар/соло-матчи читают её отсюда)
+function setStats(st) {
+  if (st != null) playerStats = st;
+  updateRecordLine(playerStats);
+}
+
+// god mode из .env / GOD_MODE=1 на сервере работает и в соло (страница отдаётся сервером)
+async function loadServerConfig() {
+  if (serverConfigLoaded) return;
+  try {
+    const r = await fetch('/config', { cache: 'no-store' });
+    if (r.ok) {
+      const c = await r.json();
+      serverGodMode = !!(c && c.godMode);
+    }
+  } catch {}
+  serverConfigLoaded = true;
+}
+loadServerConfig();
 
 // ===================== ЗВУК (WebAudio, без файлов) =====================
 let audioCtx = null;
@@ -95,10 +132,28 @@ function noiseBurst({ dur = 0.35, vol = 0.25, cutoff = 900 }) {
 renderer.onFx((f, state) => {
   // глобальные оповещения об угрозах — без приглушения по расстоянию
   if (f.tp === 'warning') {
-    if (f.z >= 3) showAnnounce(f.z===3?'☠ БОСС ДРЕДНОУТ!':f.z===4?'☠ БОСС ФАНТОМ!':'☠ БОСС ЛЕВИАФАН!');
+    if (f.k) {
+      const def = BALANCE.bosses.types[f.k];
+      showAnnounce('☠ БОСС ' + ((def ? def.name : f.k) + '').toUpperCase() + '!');
+    } else if (f.z >= 3) showAnnounce(f.z===3?'☠ БОСС ДРЕДНОУТ!':f.z===4?'☠ БОСС ФАНТОМ!':'☠ БОСС ЛЕВИАФАН!');
     else showAnnounce(f.z === 2 ? '⚠ ВРАЖЕСКИЕ КОРАБЛИ!' : '⚠ СКОРОСТНЫЕ КОМЕТЫ!');
-    tone({ type: 'sawtooth', from: 620, to: 330, dur: 0.42, vol: 0.12 });
-    setTimeout(() => tone({ type: 'sawtooth', from: 620, to: 330, dur: 0.42, vol: 0.12 }), 500);
+    if (f.k) {
+      // В2: двойной низкий гудок перед появлением босса
+      tone({ type: 'sawtooth', from: 110, to: 55, dur: 0.65, vol: 0.2 });
+      setTimeout(() => tone({ type: 'sawtooth', from: 110, to: 55, dur: 0.65, vol: 0.2 }), 620);
+    } else {
+      tone({ type: 'sawtooth', from: 620, to: 330, dur: 0.42, vol: 0.12 });
+      setTimeout(() => tone({ type: 'sawtooth', from: 620, to: 330, dur: 0.42, vol: 0.12 }), 500);
+    }
+    return;
+  }
+  // В1: смена фазы босса — глобальное объявление + сигнал
+  if (f.tp === 'bossphase') {
+    const def = (f.k && BALANCE.bosses.types[f.k]) || null;
+    const name = def ? def.name : 'БОСС';
+    showAnnounce('⚡ ' + name.toUpperCase() + ' — ФАЗА ' + f.z + '!');
+    tone({ type: 'sawtooth', from: 190, to: 90, dur: 0.5, vol: 0.18 });
+    setTimeout(() => tone({ type: 'sawtooth', from: 300, to: 140, dur: 0.6, vol: 0.18 }), 260);
     return;
   }
   // приглушение по расстоянию до своего корабля + защита от звукового шторма
@@ -120,12 +175,17 @@ renderer.onFx((f, state) => {
     case 'hit': tone({ type: 'triangle', from: 220, to: 160, dur: 0.04, vol: 0.07 * vol }); break;
     case 'boom': noiseBurst({ dur: 0.3 + f.z * 0.08, vol: 0.16 * Math.min(f.z, 2.5) * vol, cutoff: 500 + 300 / f.z }); break;
     case 'coin': tone({ type: 'sine', from: 880, to: 1420, dur: 0.09, vol: 0.09 * vol }); break;
+    case 'energy': tone({ type: 'sine', from: 720, to: 1180, dur: 0.1, vol: 0.08 * vol }); break;
     case 'spawn': tone({ type: 'sine', from: 280, to: 940, dur: 0.22, vol: 0.08 * vol }); break;
     case 'upgrade': tone({ type: 'sine', from: 620, to: 620, dur: 0.09, vol: 0.09 * vol }); tone({ type: 'sine', from: 930, to: 930, dur: 0.12, vol: 0.08 * vol }); break;
+    case 'levelup': tone({ type: 'sine', from: 540, to: 1080, dur: 0.2, vol: 0.1 }); break;
     case 'shield': tone({ type: 'sine', from: 400, to: 800, dur: 0.18, vol: 0.09 * vol }); break;
     case 'laser': noiseBurst({ dur: 0.35, vol: 0.12*vol, cutoff: 2200 }); break;
     case 'mine': tone({ type: 'triangle', from: 180, to: 90, dur: 0.15, vol: 0.08*vol }); break;
   }
+});
+renderer.onCometWarn(() => {
+  tone({ type: 'triangle', from: 1250, to: 950, dur: 0.1, vol: 0.07 });
 });
 document.addEventListener('pointerdown', ensureAudio, { once: true });
 
@@ -135,6 +195,7 @@ function showMenu() {
   els.gameScreen.classList.add('hidden');
   els.overOverlay.classList.add('hidden');
   els.waitOverlay.classList.add('hidden');
+  els.rankOverlay.classList.add('hidden');
   els.menuScreen.classList.remove('hidden');
   input.setActive(false);
 }
@@ -143,6 +204,7 @@ function showGame() {
   els.menuScreen.classList.add('hidden');
   els.waitOverlay.classList.add('hidden');
   els.overOverlay.classList.add('hidden');
+  els.rankOverlay.classList.add('hidden');
   els.gameScreen.classList.remove('hidden');
   input.setActive(true);
 }
@@ -172,6 +234,20 @@ function showOver(results, mode) {
   overShown = true;
   input.setActive(false);
   const players = [...(results.players || [])].sort((a, b) => b.score - a.score);
+  const won = results.winner != null && results.winner === selfId;
+  if (mode === 'solo') {
+    els.overImage.src = '/img/player/loose.webp';
+    els.overImage.alt = 'Поражение';
+    els.overImage.classList.remove('hidden');
+  } else if (results.winner == null) {
+    els.overImage.src = '/img/player/draw.webp';
+    els.overImage.alt = 'Ничья';
+    els.overImage.classList.remove('hidden');
+  } else {
+    els.overImage.src = won ? '/img/player/win.webp' : '/img/player/loose.webp';
+    els.overImage.alt = won ? 'Победа' : 'Поражение';
+    els.overImage.classList.remove('hidden');
+  }
   els.overTitle.textContent =
     results.reason === 'time-up' ? 'Время вышло!' :
     results.winner ? 'Есть победитель!' : 'Ничья!';
@@ -191,6 +267,8 @@ function showOver(results, mode) {
   } else {
     els.overRecord.textContent = '';
   }
+  els.overRank.classList.add('hidden');
+  showResultRank(mode);
   els.overOverlay.classList.remove('hidden');
 }
 
@@ -207,6 +285,102 @@ function toast(msg, isError = false) {
   toast._t = setTimeout(() => { els.menuError.textContent = ''; }, 4000);
 }
 
+// ===================== РЕЙТИНГ (Е2) =====================
+const RANK_LABELS = { solo: 'Solo по очкам', multi: 'Multi по очкам', coins: 'Монеты (банк)' };
+let rankMode = 'solo';
+let rankLimit = 10;
+let rankLoading = false;
+
+async function openRankOverlay() {
+  if (!requireOnline()) return;
+  els.rankOverlay.classList.remove('hidden');
+  setRankTab(rankMode);
+  setRankLimit(rankLimit);
+  await loadTopRank();
+}
+
+function setRankTab(mode) {
+  rankMode = mode;
+  for (const btn of els.rankTabs.children) {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  }
+}
+
+function setRankLimit(limit) {
+  rankLimit = limit;
+  for (const btn of els.rankSizes.children) {
+    btn.classList.toggle('active', Number(btn.dataset.limit) === limit);
+  }
+}
+
+function fmtRankNumber(n) {
+  return Number(n).toLocaleString('ru-RU');
+}
+
+function buildRankRows(container, entries, selfId, startPos) {
+  container.textContent = '';
+  entries.forEach((r, j) => {
+    const row = document.createElement('div');
+    row.className = 'rank-row' + (r.playerId === selfId ? ' me' : '');
+    const pos = document.createElement('span');
+    pos.className = 'pos';
+    pos.textContent = '#' + (startPos + j);
+    const nick = document.createElement('span');
+    nick.className = 'nick';
+    nick.textContent = r.nickname || r.playerId;
+    nick.title = r.nickname || r.playerId;
+    const score = document.createElement('span');
+    score.className = 'score';
+    score.textContent = fmtRankNumber(r.score);
+    row.append(pos, nick, score);
+    container.append(row);
+  });
+}
+
+async function loadTopRank() {
+  if (rankLoading) return;
+  rankLoading = true;
+  els.rankList.textContent = '';
+  els.rankMeta.textContent = 'Загрузка…';
+  const res = await api.leaderboardTop(rankMode, rankLimit);
+  rankLoading = false;
+  if (res.error) {
+    const div = document.createElement('div');
+    div.className = 'rank-empty';
+    div.textContent = res.message || 'Не удалось загрузить рейтинг';
+    els.rankList.append(div);
+    return;
+  }
+  const top = (res.data && res.data.top) || [];
+  els.rankMeta.textContent = RANK_LABELS[rankMode] + (top.length ? ` · всего ${top.length}` : '');
+  if (!top.length) {
+    const div = document.createElement('div');
+    div.className = 'rank-empty';
+    div.textContent = 'Пока пусто — сыграйте матч, чтобы попасть в таблицу';
+    els.rankList.append(div);
+    return;
+  }
+  buildRankRows(els.rankList, top, getIdentity().playerId, 1);
+}
+
+// экран результатов: «Ваш ранг: #N» + до 5 строк (2 выше / я / 2 ниже)
+async function showResultRank(mode) {
+  const sec = mode === 'multi' ? 'multi' : 'solo';
+  if (!isConnected()) return;
+  const res = await api.leaderboardRank(sec);
+  if (res.error || !res.data || res.data.rank == null) return;
+  const d = res.data;
+  const me = getIdentity().playerId;
+  const title = document.createElement('div');
+  title.className = 'rank-block-title';
+  title.textContent = `Ваш ранг: #${d.rank} из ${d.total} · раздел «${RANK_LABELS[sec]}»`;
+  els.overRank.innerHTML = '';
+  els.overRank.append(title);
+  const above = Math.min(2, d.rank - 1);
+  buildRankRows(els.overRank, d.entries || [], me, d.rank - above);
+  els.overRank.classList.remove('hidden');
+}
+
 // ===================== РЕЖИМЫ =====================
 function stopGame() {
   if (current?.controller?.stop) current.controller.stop();
@@ -220,6 +394,7 @@ const BUY_ERRORS = {
   'max-level': 'Максимальный уровень',
   'match-over': 'Матч окончен',
   'not-found': 'Корабль уничтожен — покупка недоступна',
+  'store-disabled': 'Апгрейды приобретаются в Ангаре, а не в бою',
 };
 
 let hintTimer = null;
@@ -248,23 +423,38 @@ async function tryBuy(track) {
   onBuyResult(res);
 }
 
-function startSolo() {
+async function startSolo() {
+  await loadServerConfig();
   stopGame();
   lastMode = 'solo';
   selfId = 'you';
   showGame();
   renderer.resetFx();
+  const st = playerStats || {};
   current = {
     mode: 'solo',
     controller: startLocalGame({
       renderer,
       input,
       nickname: els.nickInput.value.trim(),
+      modules: (st.modules && st.modules.solo) || loadSoloModules(),
+      hangar: (st.hangar && st.hangar.solo) || {},
+      cosmetics: st.cosmetics || null,
+      // Б2: solo-модули хранятся на сервере; офлайн — фолбэк в localStorage
+      onModuleUnlock: async (key) => {
+        if (!isConnected()) return grantSoloModule(key);
+        const res = await api.moduleUnlock(key, 'solo');
+        if (res.ok && res.data) setStats(res.data);
+      },
+      godMode: serverGodMode,
       onBuyResult,
       onOver: async (results) => {
         if (isConnected()) {
-          const res = await api.submitSoloScore(results.players[0]?.score || 0);
-          if (res.ok) updateRecordLine(res.data);
+          const res = await api.submitSoloScore(
+            results.players[0]?.score || 0,
+            results.players[0]?.coinsEarned || 0
+          );
+          if (res.ok) setStats(res.data);
         }
         showOver(results, 'solo');
       },
@@ -359,7 +549,7 @@ net.on('net:disconnected', () => {
 });
 
 net.on('auth:ok', (data) => {
-  if (data?.stats) updateRecordLine(data.stats);
+  if (data?.stats) setStats(data.stats);
 });
 
 net.on('matchmaking:queued', (d) => {
@@ -426,6 +616,43 @@ els.toMenuBtn.addEventListener('click', () => showMenu());
 els.againBtn.addEventListener('click', () => {
   if (lastMode === 'multi') findMatch();
   else startSolo();
+});
+
+// рейтинг (Е2)
+els.rankBtn.addEventListener('click', () => openRankOverlay());
+els.rankCloseBtn.addEventListener('click', () => els.rankOverlay.classList.add('hidden'));
+els.rankTabs.addEventListener('click', (e) => {
+  const tab = e.target.closest('.rank-tab');
+  if (!tab) return;
+  setRankTab(tab.dataset.mode);
+  loadTopRank();
+});
+els.rankSizes.addEventListener('click', (e) => {
+  const btn = e.target.closest('.rank-size');
+  if (!btn) return;
+  setRankLimit(Number(btn.dataset.limit));
+  loadTopRank();
+});
+
+// Ангар (Б2): кнопки в меню и на экране результатов
+const hangar = createHangar({
+  api,
+  getStats: () => playerStats,
+  setStats,
+  requireOnline,
+  toast,
+});
+els.hangarBtn.addEventListener('click', () => hangar.open());
+els.hangarBtnOver.addEventListener('click', () => hangar.open());
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !els.hangarOverlay.classList.contains('hidden')) {
+    els.hangarOverlay.classList.add('hidden');
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !els.rankOverlay.classList.contains('hidden')) {
+    els.rankOverlay.classList.add('hidden');
+  }
 });
 
 // апгрейды из HUD

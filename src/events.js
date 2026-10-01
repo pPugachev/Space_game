@@ -1,4 +1,8 @@
-import { getPlayerStats, submitScore, upsertPlayer } from './db.js';
+import { getPlayerStats, getModules, submitScore, upsertPlayer, unlockModule, setModuleActive, upgradeModule, getTopPlayers, getLeaderboard, isValidLeaderboardMode, getHangarStats, buyHangarStat, buyCosmetic, equipCosmetic } from './db.js';
+import { BALANCE } from '../shared/balance.js';
+import { moduleCost } from '../shared/world.js';
+
+const MODULES = BALANCE.upgrades.modules || {};
 
 const MIN_PLAYER_ID_LENGTH = 3;
 const MAX_PLAYER_ID_LENGTH = 64;
@@ -151,14 +155,131 @@ export function registerHandlers(io, { db, config, roomManager, matchmaking, gam
       if (typeof ack === 'function') ack({ ok: true, data: res });
     }));
 
+    // выбор карточки уровня rogue-like (А3): клиент присылает id выбранной карточки,
+    // сервер применяет её к игроку без списания экспы
+    socket.on('card:select', requireAuth((payload = {}, ack) => {
+      const session = gameManager?.get(socket.data.roomId);
+      if (!session) return fail(ack, 'no-session', 'No active game in this room');
+      const cardId = String(payload.cardId || '');
+      const res = session.selectCards(socket.data.player.playerId, cardId);
+      if (res.error) return fail(ack, res.error, res.message || `Cannot select card: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true });
+    }));
+
     // рекорд одиночной игры (без комнаты)
     socket.on('solo:submit', requireAuth((payload = {}, ack) => {
       const score = Number(payload.score);
       if (!Number.isFinite(score) || score < 0 || score > 1e7) {
         return fail(ack, 'invalid-score', 'score must be a number 0..10 000 000');
       }
-      const stats = submitScore(db, socket.data.player.playerId, Math.floor(score));
+      const coins = Number(payload.coins);
+      const coinsSafe = Number.isFinite(coins) && coins > 0
+        ? Math.min(Math.floor(coins), 1_000_000)
+        : 0;
+      const stats = submitScore(db, socket.data.player.playerId, Math.floor(score), {
+        mode: 'solo', coins: coinsSafe,
+      });
       if (typeof ack === 'function') ack({ ok: true, data: stats });
+    }));
+
+    // --- модули (Б1): разблокировка → активация → усиление. Покупки в Ангаре. ---
+    // mode: 'solo' | 'multi' — оплата из соответствующего банка монет.
+    socket.on('module:unlock', requireAuth((payload = {}, ack) => {
+      const key = String(payload.key || '');
+      const mode = payload.mode === 'multi' ? 'multi' : 'solo';
+      if (!MODULES[key]) return fail(ack, 'unknown-module', `Unknown module: '${key}'`);
+      const cost = moduleCost(key, 'unlock') || 0;
+      const res = unlockModule(db, socket.data.player.playerId, mode, key, cost);
+      if (res.error) return fail(ack, res.error, `Cannot unlock module: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true, data: res.stats });
+    }));
+
+    socket.on('module:setActive', requireAuth((payload = {}, ack) => {
+      const key = String(payload.key || '');
+      const mode = payload.mode === 'multi' ? 'multi' : 'solo';
+      if (!MODULES[key]) return fail(ack, 'unknown-module', `Unknown module: '${key}'`);
+      const active = !!payload.active;
+      const cost = active ? (moduleCost(key, 'activate') || 0) : 0;
+      const res = setModuleActive(db, socket.data.player.playerId, mode, key, active, cost);
+      if (res.error) return fail(ack, res.error, `Cannot set module: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true, data: res.stats });
+    }));
+
+    socket.on('module:upgrade', requireAuth((payload = {}, ack) => {
+      const key = String(payload.key || '');
+      const mode = payload.mode === 'multi' ? 'multi' : 'solo';
+      if (!MODULES[key]) return fail(ack, 'unknown-module', `Unknown module: '${key}'`);
+      const st = getModules(db, socket.data.player.playerId, mode);
+      const level = st.levels[key] || 0;
+      const cost = moduleCost(key, 'upgrade', level);
+      if (cost == null) return fail(ack, 'max-level', 'Module is at max level');
+      const res = upgradeModule(db, socket.data.player.playerId, mode, key, level, cost);
+      if (res.error) return fail(ack, res.error, `Cannot upgrade module: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true, data: res.stats });
+    }));
+
+    // --- Ангар (Б2): базовые характеристики и косметика за монеты банка режима ---
+    const HANGAR_STATS = BALANCE.hangar?.stats || [];
+    const HANGAR_MAX = BALANCE.hangar?.maxLevel || 0;
+    const HANGAR_COSMETICS = BALANCE.hangar?.cosmetics || [];
+
+    socket.on('hangar:buyStat', requireAuth((payload = {}, ack) => {
+      const key = String(payload.key || '');
+      const mode = payload.mode === 'multi' ? 'multi' : 'solo';
+      const def = HANGAR_STATS.find((s) => s.key === key);
+      if (!def) return fail(ack, 'unknown-stat', `Unknown hangar stat: '${key}'`);
+      const st = getHangarStats(db, socket.data.player.playerId, mode);
+      const level = st[key] || 0;
+      if (level >= HANGAR_MAX) return fail(ack, 'max-level', 'Stat is at max level');
+      const cost = def.costs[level] ?? null;
+      if (cost == null) return fail(ack, 'max-level', 'Stat is at max level');
+      const res = buyHangarStat(db, socket.data.player.playerId, mode, key, cost);
+      if (res.error) return fail(ack, res.error, `Cannot buy stat: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true, data: res.stats });
+    }));
+
+    socket.on('cosmetic:buy', requireAuth((payload = {}, ack) => {
+      const key = String(payload.key || '');
+      const mode = payload.mode === 'multi' ? 'multi' : 'solo';
+      const def = HANGAR_COSMETICS.find((c) => c.key === key);
+      if (!def) return fail(ack, 'unknown-cosmetic', `Unknown cosmetic: '${key}'`);
+      const res = buyCosmetic(db, socket.data.player.playerId, key, mode, def.cost);
+      if (res.error) return fail(ack, res.error, `Cannot buy cosmetic: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true, data: res.stats });
+    }));
+
+    socket.on('cosmetic:equip', requireAuth((payload = {}, ack) => {
+      const key = String(payload.key || '');
+      const def = HANGAR_COSMETICS.find((c) => c.key === key);
+      if (!def) return fail(ack, 'unknown-cosmetic', `Unknown cosmetic: '${key}'`);
+      const res = equipCosmetic(db, socket.data.player.playerId, key);
+      if (res.error) return fail(ack, res.error, `Cannot equip cosmetic: ${res.error}`);
+      if (typeof ack === 'function') ack({ ok: true, data: res.stats });
+    }));
+
+    // --- рейтинги (Е1): разделы solo / multi / coins.
+    //     leaderboard:rank — позиция игрока + 4 соседних результата (2 выше/2 ниже);
+    //     leaderboard:top  — топ-N игроков (топ-10 / топ-100 по limit). ---
+    socket.on('leaderboard:rank', requireAuth((payload = {}, ack) => {
+      const mode = String(payload.mode || 'solo').toLowerCase();
+      if (!isValidLeaderboardMode(mode)) {
+        return fail(ack, 'invalid-mode', `Unknown leaderboard mode: '${mode}'`);
+      }
+      const data = getLeaderboard(db, mode, socket.data.player.playerId);
+      if (typeof ack === 'function') ack({ ok: true, data });
+    }));
+
+    socket.on('leaderboard:top', requireAuth((payload = {}, ack) => {
+      const mode = String(payload.mode || 'solo').toLowerCase();
+      if (!isValidLeaderboardMode(mode)) {
+        return fail(ack, 'invalid-mode', `Unknown leaderboard mode: '${mode}'`);
+      }
+      const limit = payload.limit == null ? 10 : Math.floor(Number(payload.limit));
+      if (!Number.isFinite(limit) || limit <= 0) {
+        return fail(ack, 'invalid-limit', 'limit must be a positive number');
+      }
+      const data = { mode, top: getTopPlayers(db, mode, limit) };
+      if (typeof ack === 'function') ack({ ok: true, data });
     }));
 
     socket.on('disconnect', () => {

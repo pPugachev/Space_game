@@ -1,31 +1,53 @@
 // Игровая сессия мультиплеера: серверный тик-луп поверх общей симуляции.
-import { createWorld, stepWorld, snapshotOf, buyUpgrade } from '../../shared/world.js';
+import { createWorld, stepWorld, snapshotOf, buyUpgrade, selectCard } from '../../shared/world.js';
+import { getModules, getHangarStats, getCosmetics, unlockModule } from '../db.js';
 
 function clamp01(v) {
   return Math.max(-1, Math.min(1, Number(v)));
 }
 
 export class GameSession {
-  constructor({ room, io, config, logger }) {
+  constructor({ room, io, config, logger, db }) {
     this.roomId = room.id;
     this.code = room.code;
     this.io = io;
     this.logger = logger;
+    this.db = db || null;
     this.tickMs = Math.max(16, config.gameTickMs || 33);
     this.sendEveryTicks = Math.max(1, config.stateSendEveryTicks || 2);
 
     const playerIds = [];
     const nicknames = {};
+    const modulesByPlayer = {};
+    const hangarByPlayer = {};
+    const cosmeticsByPlayer = {};
     for (const p of room.players.values()) {
       playerIds.push(p.playerId);
       nicknames[p.playerId] = p.nickname;
+      // состояние модулей режима multi из аккаунта (Б1) и базовые характеристики (Б2)
+      if (db) {
+        modulesByPlayer[p.playerId] = getModules(db, p.playerId, 'multi');
+        hangarByPlayer[p.playerId] = getHangarStats(db, p.playerId, 'multi');
+        cosmeticsByPlayer[p.playerId] = getCosmetics(db, p.playerId);
+      }
     }
     this.world = createWorld({
       playerIds,
       nicknames,
       durationMs: config.matchDurationMs,
       seed: Date.now() ^ (Math.random() * 0xffffffff),
+      modulesByPlayer,
+      hangarByPlayer,
+      cosmeticsByPlayer,
+      godMode: config.godMode,
     });
+    // модуль «Ракеты» разблокируется с Фантома в аккаунте (Б1). С появлением
+    // Ангара (Б2) разблокировка больше не активирует модуль автоматически —
+    // активация покупается в Ангаре за монеты банка режима.
+    this.world.onModuleUnlock = (playerId, key) => {
+      if (!this.db) return;
+      unlockModule(this.db, playerId, 'multi', key, 0);
+    };
     this.inputs = {};
     this.tickCount = 0;
     this.finished = false;
@@ -53,6 +75,13 @@ export class GameSession {
 
   buy(playerId, track) {
     const res = buyUpgrade(this.world, playerId, track);
+    if (res.ok) this._broadcast();
+    return res;
+  }
+
+  // А3: игрок выбрал карточку уровня — сервер применяет её без списания экспы
+  selectCards(playerId, cardId) {
+    const res = selectCard(this.world, playerId, cardId);
     if (res.ok) this._broadcast();
     return res;
   }

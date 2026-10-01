@@ -6,6 +6,7 @@
       "npm *": "allow",
       "node *": "allow",
       "docker *": "allow",
+      "cmd *": "allow",
       "git *": "ask",
       "*": "ask"
     }

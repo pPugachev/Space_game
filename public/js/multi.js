@@ -1,5 +1,7 @@
 // Мультиплеер: сервер авторитетен. Клиент шлёт инпуты (~20 Гц) и рисует
 // интерполированные снапшоты с задержкой ~120 мс.
+import { showCardPicker, hideCardPicker } from './cards.js';
+
 const INTERP_DELAY_MS = 120;
 const SEND_INTERVAL_MS = 50;
 
@@ -22,6 +24,25 @@ export function startMultiGame({ net, renderer, input, selfId, onOver, onBuyResu
     // результаты покажет main.js; здесь просто останавливаемся
     stop();
   });
+  hideCardPicker();
+  let pickerBusy = false;
+
+  // А3: в свежем снапшоте появились карточки уровня → показываем оверлей,
+  // выбор уходит на сервер (card:select), сервер применяет карточку и гасит pc.
+  function checkCards(latest) {
+    const me = latest && Array.isArray(latest.ps) ? latest.ps.find((p) => p.i === selfId) : null;
+    const pending = (latest && latest.pc && me) ? latest.pc[me.i] : null;
+    if (pending && pending.length && !pickerBusy) {
+      pickerBusy = true;
+      showCardPicker(pending, (cardId) => {
+        net.api.selectCard(cardId);
+        pickerBusy = false;
+      });
+    } else if (!pending && pickerBusy) {
+      pickerBusy = false;
+      hideCardPicker();
+    }
+  }
 
   async function doBuy(track) {
     const res = await net.api.buyUpgrade(track);
@@ -119,6 +140,9 @@ export function startMultiGame({ net, renderer, input, selfId, onOver, onBuyResu
     const renderAt = performance.now() - INTERP_DELAY_MS;
     const state = interpolated(renderAt);
     if (state) {
+      // карточки берём из свежего снапшота (буфер), а не из интерполированного
+      const latest = buffer.length ? buffer[buffer.length - 1].s : null;
+      checkCards(latest);
       renderer.setState(state);
       renderer.updateHud(state, selfId);
     }
@@ -131,6 +155,7 @@ export function startMultiGame({ net, renderer, input, selfId, onOver, onBuyResu
     offOver();
     if (raf) cancelAnimationFrame(raf);
     raf = null;
+    hideCardPicker();
   }
 
   return {
